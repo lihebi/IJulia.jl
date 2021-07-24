@@ -16,6 +16,37 @@ import REPL: helpmode
 # use a global array to accumulate "payloads" for the execute_reply message
 const execute_payloads = Dict[]
 
+
+function isModuleDefined(names)
+    mod = :(Main)
+    for name in names
+        name = Symbol(name)
+        if !isdefined(eval(mod), name) 
+            return false
+        end
+        mod = :($mod.$name)
+    end
+    return true
+end
+
+function ensureModuleDefined(namespace)
+    # ensure the module is defined, and return the module
+    # 1. split with /
+    names = split(namespace, "/", keepempty=false)
+    mod = :(Main)
+    for name in names
+        name = Symbol(name)
+        if !isdefined(eval(mod), name) 
+            include_string(eval(mod), "module $name end")
+        end
+        mod = :($mod.$name)
+    end
+    return mod, eval(mod)
+end
+
+# isModuleDefined(["ccc", "cc"])
+# ensureModuleDefined(["ccc", "cc"])
+
 function execute_request(socket, msg)
     code = msg.content["code"]
     @vprintln("EXECUTING ", code)
@@ -63,10 +94,42 @@ function execute_request(socket, msg)
         ans = result = if hcode != code # help request
             Core.eval(Main, helpmode(hcode))
         else
-            #run the code!
-            occursin(magics_regex, code) && match(magics_regex, code).offset == 1 ? magics_help(code) :
-                SOFTSCOPE[] ? softscope_include_string(current_module[], code, "In[$n]") :
-                include_string(current_module[], code, "In[$n]")
+            # run the code!
+            if code == "CPAddImport"
+                @vprintln "HEBI: CPAddImport:" msg.content
+                from = msg.content["cp"]["from"]
+                to = msg.content["cp"]["to"]
+                name = msg.content["cp"]["name"]
+                @vprintln "ensure " from
+                from_name, _ = ensureModuleDefined(from)
+                @vprintln "ensure " to
+                _, to_mod = ensureModuleDefined(to)
+                newcode = "using $from_name: $name as CP$name\n$name=CP$name\n$name"
+                @vprintln "HEBI: newcode:" newcode
+                include_string(to_mod, newcode, "In[$n]")
+            elseif code == "CPDeleteImport"
+                @vprintln "HEBI: CPDeleteImport:" msg.content
+                ns = msg.content["cp"]["ns"]
+                name = msg.content["cp"]["name"]
+                _, mod = ensureModuleDefined(ns)
+                include_string(mod, "$name=nothing", "In[$n]")
+            else
+                # if "cp" in msg.content && "namespace" in msg.content["cp"]
+                    # get the namespace
+                    namespace = msg.content["cp"]["namespace"]
+                    @vprintln "HEBI: namespace:" namespace
+                    
+                    # 2. create the namespaces if not exists
+                    _, mod = ensureModuleDefined(namespace)
+                # else
+                #     mod = current_module[]
+                # end
+                
+                # 3. evaluate in that namespace
+                occursin(magics_regex, code) && match(magics_regex, code).offset == 1 ? magics_help(code) :
+                    SOFTSCOPE[] ? softscope_include_string(mod, code, "In[$n]") :
+                    include_string(mod, code, "In[$n]")
+            end
         end
 
         if silent
